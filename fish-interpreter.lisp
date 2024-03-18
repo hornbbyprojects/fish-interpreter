@@ -3,12 +3,12 @@
 (in-package #:fish-interpreter)
 
 (defstruct fish-frame
-  (registers (make-hash-table :test 'equal))
+  (register nil)
   (stack nil))
 
 (defstruct fish-state
   (frames (list (make-fish-frame)))
-  (direction (list 0 0))
+  (direction (list 1 0))
   (position (list 0 0))
   (text-mode nil)
   (instruction-grid (list)))
@@ -20,11 +20,25 @@
       0
       (length (car (fish-state-instruction-grid fish-state)))))
 
+(defun pop-stack (fish-state)
+  (let ((ret (pop (fish-frame-stack (car (fish-state-frames fish-state))))))
+    (if (null ret)
+        (error "Popped off an empty stack!")
+        ret)))
+
+(defun push-stack (fish-state value)
+  (push value (fish-frame-stack (car (fish-state-frames fish-state)))))
+
 (defstruct op
   discriminator
   text-char
   (specific-op nil))
 
+(defun perform-op-swap (fish-state)
+  (let ((a (pop-stack fish-state))
+        (b (pop-stack fish-state)))
+    (push-stack fish-state a)
+    (push-stack fish-state b)))
 (defun perform-op-direction-up (fish-state)
   (setf (fish-state-direction fish-state) '(0 -1)))
 
@@ -56,12 +70,6 @@
   (setf (fish-state-direction fish-state)
         (list (cadr (fish-state-direction fish-state))
               (car (fish-state-direction fish-state)))))
-
-(defun pop-stack (fish-state)
-  (let ((ret (pop (fish-frame-stack (car (fish-state-frames fish-state))))))
-    (if (null ret)
-        (error "Popped off an empty stack!")
-        ret)))
 
 
 
@@ -106,7 +114,7 @@
 
 (defun perform-op-push-stack (fish-state value)
   (declare (type integer value))
-  (push value (fish-frame-stack (car (fish-state-frames fish-state)))))
+  (push-stack fish-state value))
 
 (defun perform-op-toggle-text-mode (fish-state)
   (setf (fish-state-text-mode fish-state) (not (fish-state-text-mode fish-state))))
@@ -121,7 +129,28 @@
 
 (defun perform-op-duplicate (fish-state)
   (let ((top-value (car (fish-frame-stack (car (fish-state-frames fish-state))))))
-    (perform-op-push-stack fish-state top-value)))
+    (push-stack fish-state top-value)))
+
+(defun perform-op-register (fish-state)
+  (declare (type fish-state fish-state))
+  (let ((first-frame (car (fish-state-frames fish-state))))
+    (if (null (fish-frame-register first-frame))
+        (setf (fish-frame-register first-frame) (pop (fish-frame-stack first-frame)))
+        (progn
+          (push (fish-frame-register first-frame) (fish-frame-stack first-frame))
+          (setf (fish-frame-register first-frame) nil)))))
+
+(defmacro perform-binary-op (fish-state a b &body body)
+  (let ((result (gensym)))
+    `(let* ((,a (pop-stack ,fish-state))
+            (,b (pop-stack ,fish-state))
+            (,result (progn ,@body)))
+       (push-stack ,fish-state ,result))))
+
+(defun perform-op-jump (fish-state)
+  (let ((y (pop-stack fish-state))
+        (x (pop-stack fish-state)))
+    (setf (fish-state-position fish-state) (list x y))))
 
 (defun perform-op (fish-state op)
   (ecase (op-discriminator op)
@@ -146,6 +175,17 @@
     (:op-trampoline (perform-op-trampoline fish-state))
     (:op-conditional-trampoline (perform-op-conditional-trampoline fish-state))
     (:op-quit (return-from perform-op t))
+    (:op-register (perform-op-register fish-state))
+    (:op-add (perform-binary-op fish-state a b (+ a b)))
+    (:op-sub (perform-binary-op fish-state a b (- a b)))
+    (:op-mul (perform-binary-op fish-state a b (* a b)))
+    (:op-div (perform-binary-op fish-state a b (/ a b)))
+    (:op-mod (perform-binary-op fish-state a b (mod a b)))
+    (:op-equals (perform-binary-op fish-state a b (if (= a b) 1 0)))
+    (:op-lt (perform-binary-op fish-state a b (if (< a b) 1 0)))
+    (:op-gt (perform-binary-op fish-state a b (if (> a b) 1 0)))
+    (:op-swap (perform-op-swap fish-state))
+    (:op-jump (perform-op-jump fish-state))
     (:op-print-position (format t "~a~%" (fish-state-position fish-state))))
   nil)
 
@@ -155,11 +195,13 @@
     (#\space t)
     (#\newline t)
     (#\tab t)))
+
 (defun parse-op (c)
   (declare (type character c))
   (let ((ret
           (cond
             ((and (<= (char-code c) (char-code #\9)) (>= (char-code c) (char-code #\0))) (make-op :discriminator :op-push-stack :specific-op (- (char-code c) (char-code #\0))))
+            ((and (<= (char-code c) (char-code #\f)) (>= (char-code c) (char-code #\a))) (make-op :discriminator :op-push-stack :specific-op (+ 10 (- (char-code c) (char-code #\a)))))
             ((equal c #\>) (make-op :discriminator :op-direction-right))
             ((equal c #\^) (make-op :discriminator :op-direction-up))
             ((equal c #\<) (make-op :discriminator :op-direction-left))
@@ -175,10 +217,21 @@
             ((equal c #\r) (make-op :discriminator :op-reverse-stack))
             ((equal c #\space) (make-op :discriminator :op-nop))
             ((equal c #\;) (make-op :discriminator :op-quit))
-            ((equal c #\") (make-op :discriminator :op-toggle-text-mode))
+            ((or (equal c #\") (equal c #\')) (make-op :discriminator :op-toggle-text-mode))
             ((equal c #\:) (make-op :discriminator :op-duplicate))
+            ((equal c #\&) (make-op :discriminator :op-register))
             ((equal c #\!) (make-op :discriminator :op-trampoline))
             ((equal c #\?) (make-op :discriminator :op-conditional-trampoline))
+            ((equal c #\+) (make-op :discriminator :op-add))
+            ((equal c #\-) (make-op :discriminator :op-sub))
+            ((equal c #\*) (make-op :discriminator :op-mul))
+            ((equal c #\,) (make-op :discriminator :op-div))
+            ((equal c #\%) (make-op :discriminator :op-mod))
+            ((equal c #\=) (make-op :discriminator :op-equals))
+            ((equal c #\() (make-op :discriminator :op-lt))
+            ((equal c #\)) (make-op :discriminator :op-gt))
+            ((equal c #\$) (make-op :discriminator :op-swap))
+            ((equal c #\.) (make-op :discriminator :op-jump))
             ((whitespace-char-p c) nil)
             (t (make-op :discriminator :op-data-only))
             )))
@@ -214,5 +267,8 @@
              (when (perform-op fish-state op)
                (loop-finish)))
          (move-cursor fish-state))))
-(defparameter *test-program* (list (parse-program-single-line "12345 3[  r  ]  rnnnnn")))
 
+(defun run-file (filename &rest args)
+  (with-open-file (in-stream filename)
+    (let ((program (parse-program in-stream)))
+      (apply #'run-program program args))))
