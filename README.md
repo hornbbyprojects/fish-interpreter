@@ -1,9 +1,3 @@
 # fish-interpreter
-### _Your Name <your.name@example.com>_
-
-This is a project to do ... something.
-
-## License
-
-Specify license here
+An interpreter for the Fish esolang (https://esolangs.org/wiki/Fish)
 
